@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Check-in Cantiere</title>
+  <!-- Carico la libreria in modo compatibile con Safari/iOS -->
+  <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+  <style>
+    :root { --card-bg: rgba(255,255,255,0.9); }
+    body {
+      font-family: Arial, sans-serif;
+      background: url('https://images.unsplash.com/photo-1581092795360-fd1ca04f27d1?auto=format&fit=crop&w=1600&q=60') center/cover no-repeat fixed;
+      margin:0; padding:24px;
+    }
+    .card {
+      max-width: 520px;
+      margin: 0 auto;
+      background: var(--card-bg);
+      border-radius: 14px;
+      padding: 20px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.15);
+    }
+    h2 { margin: 8px 0 14px; text-align:center; }
+    #reader { width:100%; height: 320px; margin: 10px 0; border-radius: 12px; overflow: hidden; background:#000; }
+    label { display:block; font-weight:600; margin-top:10px; text-align:left; }
+    input { width:100%; padding:12px; margin-top:6px; font-size:17px; border-radius:10px; border:1px solid #cfcfcf; box-sizing:border-box; }
+    .row { display:flex; gap:12px; }
+    .btn { width:100%; padding:12px; margin-top:10px; font-size:17px; border-radius:10px; border:0; cursor:pointer; font-weight:700; }
+    .btn-primary { background:#0d6efd; color:#fff; }
+    .btn-ghost { background:#ececec; color:#333; }
+    .btn-entry { background:#28a745; color:#fff; }
+    .btn-exit { background:#dc3545; color:#fff; }
+    #success { color:#0a7a28; font-weight:bold; margin-top:12px; text-align:center; }
+    #error { color:#b00020; font-weight:bold; margin-top:12px; text-align:center; }
+    .pill { display:inline-block; padding:6px 10px; background:#eef3ff; color:#0d47a1; border-radius:999px; font-size:13px; margin-bottom:8px; }
+    .hidden { display:none; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>Registrazione Presenza</h2>
+    <div id="scanArea">
+      <span class="pill">1) Scansiona il QR • 2) Compila • 3) Registra</span>
+      <p style="text-align:center">Premi <strong>Avvia scansione QR</strong> e inquadra il QR esposto in portineria.</p>
+      <div id="reader"></div>
+      <button id="startScan" class="btn btn-primary">Avvia scansione QR</button>
+      <p id="scanMsg" style="text-align:center"></p>
+    </div>
+
+    <form id="formArea" class="hidden" autocomplete="off">
+      <label>Cantiere</label>
+      <input id="cantiere" type="text" readonly />
+
+      <label>Nome e Cognome</label>
+      <input id="nome" type="text" placeholder="Nome e Cognome" required />
+
+      <label>Azienda</label>
+      <input id="azienda" type="text" placeholder="Azienda (anche società terze)" required />
+
+      <div class="row">
+        <button id="btnEntrata" type="button" class="btn btn-entry">Entrata</button>
+        <button id="btnUscita" type="button" class="btn btn-exit">Uscita</button>
+      </div>
+
+      <button id="restartBtn" class="btn btn-ghost" type="button">Scansiona un altro QR</button>
+    </form>
+
+    <p id="success"></p>
+    <p id="error"></p>
+  </div>
+
+  <script>
+    const API_ENDPOINT = "/api/save"; 
+    let html5QrCode;
+    let lastCantiere = null;
+    let scanning = false;
+
+    const el = (id) => document.getElementById(id);
+    const show = (id) => el(id).classList.remove("hidden");
+    const hide = (id) => el(id).classList.add("hidden");
+    const setText = (id, msg) => el(id).innerText = msg;
+
+    function showError(msg){ setText("error", msg); }
+    function clearError(){ setText("error", ""); }
+    function showSuccess(msg){ setText("success", msg); setTimeout(()=> setText("success",""), 5000); }
+
+    async function startCameraScan() {
+      if (scanning) return;
+      clearError();
+      setText("scanMsg", "Apro fotocamera... autorizza l'accesso se richiesto.");
+      el("startScan").disabled = true;
+
+      try {
+        const readerDiv = el("reader");
+        readerDiv.style.display = "block";
+        readerDiv.style.height = "320px";
+
+        // Verifica che la libreria sia disponibile
+        if (typeof Html5Qrcode === 'undefined') {
+          throw new Error("Libreria HTML5-QRCode non caricata.");
+        }
+
+        html5QrCode = new Html5Qrcode("reader");
+        const config = { fps: 10, qrbox: 260 };
+        scanning = true;
+
+        await html5QrCode.start(
+          { facingMode: "environment" },
+          config,
+          decodedText => {
+            stopCamera().then(()=>{
+              setText("scanMsg", "QR letto con successo.");
+              handleQr(decodedText);
+            });
+          },
+          err => { /* frame errors ignored */ }
+        );
+      } catch (e) {
+        showError("Errore nell'aprire la fotocamera: " + (e && e.message ? e.message : e));
+        el("startScan").disabled = false;
+        scanning = false;
+      }
+    }
+
+    async function stopCamera(){
+      try {
+        if (html5QrCode) {
+          await html5QrCode.stop();
+          await html5QrCode.clear();
+        }
+      } catch (e) {}
+      scanning = false;
+    }
+
+    function handleQr(text) {
+      clearError();
+      let cantiere = null;
+      try {
+        const obj = JSON.parse(text);
+        if (obj.cantiere) cantiere = obj.cantiere;
+      } catch (e) {
+        try {
+          const u = new URL(text);
+          cantiere = u.searchParams.get("cantiere") || null;
+        } catch (e2) {
+          cantiere = text;
+        }
+      }
+
+      if (!cantiere) {
+        showError("QR non valido: manca il nome del cantiere.");
+        el("startScan").disabled = false;
+        return;
+      }
+
+      lastCantiere = cantiere;
+      el("cantiere").value = cantiere;
+
+      hide("scanArea");
+      show("formArea");
+    }
+
+    async function submitPresence(azione){
+      clearError();
+      const nome = el("nome").value.trim();
+      const azienda = el("azienda").value.trim();
+      const cantiere = lastCantiere;
+
+      if (!nome || !azienda) {
+        showError("Compila nome e azienda.");
+        return;
+      }
+
+      const now = new Date();
+      const data = now.toLocaleDateString("it-IT");
+      const ora = now.toLocaleTimeString("it-IT");
+
+      const payload = { data, ora, nome, azienda, cantiere, azione };
+
+      try {
+        const res = await fetch(API_ENDPOINT, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        if (!res.ok) throw new Error(await res.text());
+
+        showSuccess("✅ Presenza registrata!");
+        hide("formArea");
+        show("scanArea");
+        el("startScan").disabled = false;
+        el("nome").value = "";
+        el("azienda").value = "";
+        lastCantiere = null;
+        setText("scanMsg","");
+      } catch (e) {
+        showError("Errore invio: " + e.message);
+      }
+    }
+
+    el("startScan").addEventListener("click", startCameraScan);
+    el("btnEntrata").addEventListener("click", ()=> submitPresence("Entrata"));
+    el("btnUscita").addEventListener("click", ()=> submitPresence("Uscita"));
+    el("restartBtn").addEventListener("click", ()=>{
+      hide("formArea");
+      show("scanArea");
+      el("startScan").disabled = false;
+      el("nome").value = "";
+      el("azienda").value = "";
+      lastCantiere = null;
+      clearError();
+      setText("scanMsg","");
+    });
+  </script>
+</body>
+</html>
